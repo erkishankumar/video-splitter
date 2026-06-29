@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Video Splitter</title>
+
+<!-- REQUIRED for GitHub Pages / any static host: injects SharedArrayBuffer headers -->
+<script src="coi-serviceworker.js"></script>
+
+<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;500;600&display=swap');
+
+  :root {
+    --bg:      #09090f;
+    --surface: #121220;
+    --border:  #1e1e38;
+    --accent:  #7f5af0;
+    --green:   #2cb67d;
+    --text:    #fffffe;
+    --muted:   #72718a;
+    --warn:    #f4a261;
+    --red:     #ef4565;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100dvh;
+    padding: 0 16px 80px;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 28px 0 22px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 20px;
+  }
+  .logo {
+    width: 40px; height: 40px;
+    background: var(--accent);
+    border-radius: 10px;
+    display: grid; place-items: center;
+    font-size: 1.3rem; flex-shrink: 0;
+  }
+  .logo-text h1 { font-size: 1.15rem; font-weight: 600; }
+  .logo-text p  { font-size: 0.72rem; color: var(--muted); margin-top: 1px; }
+  .iso-badge {
+    margin-left: auto;
+    padding: 4px 9px;
+    background: rgba(44,182,125,0.12);
+    border: 1px solid rgba(44,182,125,0.25);
+    border-radius: 20px;
+    font-size: 0.65rem;
+    color: var(--green);
+    font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap;
+  }
+
+  /* ── Compat banner (shown on iOS) ── */
+  .ios-warn {
+    display: none;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 13px;
+    background: rgba(244,162,97,0.08);
+    border: 1px solid rgba(244,162,97,0.25);
+    border-radius: 10px;
+    font-size: 0.73rem;
+    color: var(--warn);
+    line-height: 1.55;
+    margin-bottom: 16px;
+  }
+  body.ios .ios-warn { display: flex; }
+
+  /* ── Card ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+    margin-bottom: 14px;
+  }
+  .card-title {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 1.6px;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+
+  /* ── Drop zone ── */
+  .drop-zone {
+    border: 1.5px dashed var(--border);
+    border-radius: 12px;
+    padding: 36px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    user-select: none;
+    -webkit-user-select: none;
+    position: relative;
+  }
+  .drop-zone:active, .drop-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(127,90,240,0.05);
+  }
+  .drop-zone input { display: none; }
+  .drop-icon   { font-size: 2rem; margin-bottom: 8px; }
+  .drop-label  { font-size: 0.88rem; font-weight: 500; color: #c0b8f0; }
+  .drop-sub    { font-size: 0.7rem; color: var(--muted); margin-top: 6px; line-height: 1.6; }
+
+  /* ── File chip ── */
+  .file-chip {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg);
+    border-radius: 10px;
+    margin-top: 10px;
+    font-size: 0.78rem;
+  }
+  .file-chip.visible { display: flex; }
+  .file-meta { flex: 1; min-width: 0; }
+  .file-name {
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .file-sub  { color: var(--muted); margin-top: 2px; font-size: 0.68rem; }
+  .rm-btn    { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1rem; padding: 4px 6px; border-radius: 6px; }
+  .rm-btn:active { color: var(--warn); }
+
+  /* ── Duration grid ── */
+  .dur-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  @media (min-width: 480px) { .dur-grid { grid-template-columns: repeat(6, 1fr); } }
+
+  .dur-btn {
+    padding: 12px 4px;
+    background: var(--bg);
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 0.75rem;
+    font-family: 'JetBrains Mono', monospace;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s;
+    /* Larger tap target on mobile */
+    min-height: 44px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .dur-btn.active { background: var(--accent); border-color: var(--accent); font-weight: 700; color: #fff; }
+
+  .custom-row {
+    display: flex; align-items: center; gap: 8px; margin-top: 4px;
+  }
+  .custom-row input {
+    flex: 1;
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    outline: none;
+    min-height: 44px;
+    /* Prevent iOS zoom on focus */
+    font-size: 16px;
+  }
+  .custom-row input:focus { border-color: var(--accent); }
+  .custom-row span { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+
+  /* ── Preview box ── */
+  .preview-box {
+    margin-top: 14px;
+    padding: 12px;
+    background: var(--bg);
+    border-radius: 8px;
+    font-size: 0.76rem;
+    color: var(--muted);
+    line-height: 1.65;
+  }
+  .preview-box .hl { color: var(--green); font-family: 'JetBrains Mono', monospace; }
+
+  /* ── RAM indicator ── */
+  .ram-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 0.72rem;
+    margin-top: 10px;
+  }
+  .ram-row.ok   { background: rgba(44,182,125,0.08); color: var(--green); border: 1px solid rgba(44,182,125,0.2); }
+  .ram-row.mid  { background: rgba(244,162,97,0.08); color: var(--warn);  border: 1px solid rgba(244,162,97,0.2); }
+  .ram-row.high { background: rgba(239,69,101,0.08); color: var(--red);   border: 1px solid rgba(239,69,101,0.2); }
+
+  /* ── Split button ── */
+  .split-btn {
+    width: 100%;
+    margin-top: 14px;
+    padding: 15px;
+    background: var(--accent);
+    border: none;
+    border-radius: 12px;
+    color: #fff;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.2px;
+    min-height: 52px;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    transition: opacity 0.15s;
+  }
+  .split-btn:active:not(:disabled) { opacity: 0.8; }
+  .split-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* ── Status ── */
+  .status-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .status-msg { font-size: 0.78rem; color: var(--muted); }
+  .status-msg.active { color: #c0b8f0; }
+  .status-msg.done   { color: var(--green); }
+  .status-msg.error  { color: var(--red); }
+  .part-counter      { font-size: 0.7rem; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+
+  .prog-track { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 14px; }
+  .prog-fill  { height: 100%; background: linear-gradient(90deg, var(--accent), var(--green)); border-radius: 2px; width: 0%; transition: width 0.4s; }
+
+  /* ── Parts list ── */
+  .parts-scroll { max-height: 260px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .part-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    background: var(--bg);
+    font-size: 0.72rem;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+  .dot.active { background: var(--warn); animation: blink 0.9s infinite; }
+  .dot.done   { background: var(--green); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  .part-name { font-family: 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+  .part-time { color: var(--muted); flex-shrink: 0; }
+
+  /* ── Log ── */
+  .log-box {
+    background: var(--bg); border-radius: 8px; padding: 10px 12px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--muted);
+    height: 80px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    white-space: pre-wrap; word-break: break-all;
+  }
+
+  /* ── How to use (mobile collapsible) ── */
+  details {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    margin-bottom: 14px;
+    overflow: hidden;
+  }
+  summary {
+    padding: 14px 18px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    color: var(--muted);
+    list-style: none;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: '›'; font-size: 1.1rem; transition: transform 0.2s; }
+  details[open] summary::after { transform: rotate(90deg); }
+  .how-body {
+    padding: 0 18px 16px;
+    font-size: 0.75rem;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+  .how-body strong { color: var(--text); }
+
+  /* ── Footer ── */
+  footer {
+    text-align: center; font-size: 0.68rem; color: var(--muted);
+    padding-top: 32px; margin-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  footer span { color: var(--green); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">✂️</div>
+  <div class="logo-text">
+    <h1>Video Splitter</h1>
+    <p>Lossless · All formats · Works offline</p>
+  </div>
+  <div class="iso-badge">100% local</div>
+</header>
+
+<!-- iOS warning — shown via JS -->
+<div class="ios-warn" id="iosWarn">
+  ⚠️ <div><strong>iOS Safari tip:</strong> Files over ~250 MB may crash the tab due to Apple's WebAssembly memory limits. For large files, use an Android device or desktop browser instead.</div>
+</div>
+
+<!-- ── INPUT ── -->
+<div class="card">
+  <div class="card-title">Select File</div>
+
+  <div class="drop-zone" id="dropZone">
+    <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.flac,.opus,.ogg,.ts,.m2ts,.3gp,.wma">
+    <div class="drop-icon">🎬</div>
+    <div class="drop-label">Tap to browse or drop a file</div>
+    <div class="drop-sub">MKV · MP4 · AVI · MOV · WebM · TS<br>MP3 · AAC · FLAC · OGG · WAV · OPUS</div>
+  </div>
+
+  <div class="file-chip" id="fileChip">
+    <span id="fileIcon" style="font-size:1.2rem">🎞</span>
+    <div class="file-meta">
+      <div class="file-name" id="fileName">—</div>
+      <div class="file-sub" id="fileSub">—</div>
+    </div>
+    <button class="rm-btn" id="removeBtn">✕</button>
+  </div>
+
+  <div class="ram-row" id="ramRow" style="display:none"></div>
+</div>
+
+<!-- ── SPLIT SETTINGS ── -->
+<div class="card">
+  <div class="card-title">Split every…</div>
+
+  <div class="dur-grid">
+    <button class="dur-btn active" data-sec="15">15 s</button>
+    <button class="dur-btn" data-sec="30">30 s</button>
+    <button class="dur-btn" data-sec="60">1 min</button>
+    <button class="dur-btn" data-sec="120">2 min</button>
+    <button class="dur-btn" data-sec="300">5 min</button>
+    <button class="dur-btn" data-sec="600">10 min</button>
+  </div>
+
+  <div class="custom-row">
+    <input type="number" id="customSec" placeholder="Custom seconds" min="1" inputmode="numeric">
+    <span>seconds</span>
+  </div>
+
+  <div class="preview-box" id="previewBox">Select a file to preview split.</div>
+
+  <button class="split-btn" id="splitBtn" disabled>⚡ Split File</button>
+</div>
+
+<!-- ── OUTPUT / PROGRESS ── -->
+<div class="card" id="outputCard">
+  <div class="card-title">Output</div>
+  <div class="status-row">
+    <div class="status-msg" id="statusMsg">Waiting for file…</div>
+    <div class="part-counter" id="partCounter"></div>
+  </div>
+  <div class="prog-track"><div class="prog-fill" id="progFill"></div></div>
+  <div class="parts-scroll">
+    <div class="parts-list" id="partsList">
+      <div style="font-size:0.74rem;color:var(--muted);text-align:center;padding:20px 0">Parts will appear here</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── LOG ── -->
+<div class="card">
+  <div class="card-title">Console</div>
+  <div class="log-box" id="logBox">Ready. FFmpeg will auto-download (~25 MB) on first run, then cached by your browser.</div>
+</div>
+
+<!-- ── HOW TO USE ── -->
+<details>
+  <summary>How to use &amp; deploy to GitHub Pages</summary>
+  <div class="how-body">
+    <strong>Local use:</strong> Just open <code>index.html</code> in Chrome or Firefox.<br><br>
+    <strong>GitHub Pages:</strong><br>
+    1. Push both <code>index.html</code> and <code>coi-serviceworker.js</code> to your repo<br>
+    2. Enable GitHub Pages in repo Settings → Pages<br>
+    3. That's it — the service worker handles the SharedArrayBuffer headers automatically<br><br>
+    <strong>Netlify / Vercel:</strong> Works out of the box. You can also add a <code>_headers</code> file (Netlify) or <code>vercel.json</code> with COOP/COEP headers instead of the service worker.<br><br>
+    <strong>iOS limit:</strong> Files over ~250 MB may crash Safari on iPhone/iPad. This is an Apple WebAssembly memory restriction, not a bug in this tool.<br><br>
+    <strong>Quality:</strong> Uses <code>-c copy</code> — no re-encoding, no quality loss. Splits happen at the nearest keyframe.
+  </div>
+</details>
+
+<footer>
+  Powered by <span>FFmpeg.wasm</span> · All processing runs on your device · Nothing uploaded anywhere
+</footer>
+
+<script>
+// ──────────────────────────────────────────────
+//  iOS detection
+// ──────────────────────────────────────────────
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+if (isIOS) document.body.classList.add('ios');
+
+// ──────────────────────────────────────────────
+//  State
+// ──────────────────────────────────────────────
+const { createFFmpeg, fetchFile } = FFmpeg;
+let ffmpeg = null, ffmpegReady = false;
+let selectedFile = null, selectedSec = 15, detectedDur = 0;
+
+// ──────────────────────────────────────────────
+//  Helpers
+// ──────────────────────────────────────────────
+function fmt(s) {
+  s = Math.max(0, s);
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = (s%60).toFixed(1);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${String(Math.floor(s%60)).padStart(2,'0')}s`;
+  return `${sec}s`;
+}
+function fmtSize(b) {
+  if (b>1e9) return (b/1e9).toFixed(2)+' GB';
+  if (b>1e6) return (b/1e6).toFixed(1)+' MB';
+  return (b/1e3).toFixed(0)+' KB';
+}
+function mimeFor(ext) {
+  return ({mp4:'video/mp4',mkv:'video/x-matroska',webm:'video/webm',avi:'video/x-msvideo',
+    mov:'video/quicktime',flv:'video/x-flv',wmv:'video/x-ms-wmv',ts:'video/mp2t',
+    m2ts:'video/mp2t',m4v:'video/mp4','3gp':'video/3gpp',mp3:'audio/mpeg',aac:'audio/aac',
+    flac:'audio/flac',ogg:'audio/ogg',wav:'audio/wav',m4a:'audio/mp4',
+    opus:'audio/opus',wma:'audio/x-ms-wma'})[ext]||'application/octet-stream';
+}
+
+function log(msg) {
+  const el = document.getElementById('logBox');
+  el.textContent += '\n'+msg; el.scrollTop = el.scrollHeight;
+}
+function setStatus(msg, cls='') {
+  const el = document.getElementById('statusMsg');
+  el.textContent = msg; el.className = 'status-msg'+(cls?' '+cls:'');
+}
+function setProgress(pct) { document.getElementById('progFill').style.width = Math.min(100,pct)+'%'; }
+
+// ──────────────────────────────────────────────
+//  RAM warning
+// ──────────────────────────────────────────────
+function updateRamWarning(file) {
+  const row = document.getElementById('ramRow');
+  if (!file) { row.style.display='none'; return; }
+  const mb = file.size / 1e6;
+  row.style.display = 'flex';
+  // FFmpeg.wasm needs ~3x file size in RAM
+  const needed = Math.round(mb * 3);
+  if (mb < 200) {
+    row.className = 'ram-row ok';
+    row.textContent = `✓ ${fmtSize(file.size)} file — ~${needed} MB RAM needed. Should be fine.`;
+  } else if (mb < 500) {
+    row.className = 'ram-row mid';
+    row.textContent = `⚠️ ${fmtSize(file.size)} file — ~${needed} MB RAM needed. Desktop browser recommended.`;
+  } else {
+    row.className = 'ram-row high';
+    row.textContent = `⛔ ${fmtSize(file.size)} file — ~${needed} MB RAM needed. May crash on mobile or low-RAM devices.`;
+  }
+}
+
+// ──────────────────────────────────────────────
+//  FFmpeg init
+// ──────────────────────────────────────────────
+async function ensureFFmpeg() {
+  if (ffmpegReady) return;
+  log('Loading FFmpeg…');
+  ffmpeg = createFFmpeg({
+    log: false,
+    logger: ({ type, message }) => {
+      const m = message.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/);
+      if (m) detectedDur = parseInt(m[1])*3600 + parseInt(m[2])*60 + parseFloat(m[3]);
+      if (type==='fferr' && (
+        message.includes('Duration') || message.includes('Video:') ||
+        message.includes('Audio:')   || message.includes('Error')
+      )) log(message.trim());
+    }
+  });
+  await ffmpeg.load();
+  ffmpegReady = true;
+  log('FFmpeg ready ✓');
+}
+
+// ──────────────────────────────────────────────
+//  Duration via HTML5
+// ──────────────────────────────────────────────
+function tryHtml5Duration(file) {
+  return new Promise(resolve => {
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    const url = URL.createObjectURL(file);
+    v.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve(isFinite(v.duration) ? v.duration : 0); };
+    v.onerror = () => { URL.revokeObjectURL(url); resolve(0); };
+    v.src = url;
+    setTimeout(() => resolve(0), 3000);
+  });
+}
+
+// ──────────────────────────────────────────────
+//  File handling
+// ──────────────────────────────────────────────
+async function handleFile(file) {
+  selectedFile = file; detectedDur = 0;
+  const ext = file.name.split('.').pop().toLowerCase();
+  const audioExts = ['mp3','aac','flac','ogg','wav','m4a','opus','wma','alac'];
+  document.getElementById('fileIcon').textContent = audioExts.includes(ext) ? '🎵' : '🎞';
+  document.getElementById('fileName').textContent = file.name;
+  document.getElementById('fileSub').textContent = fmtSize(file.size) + ' · detecting…';
+  document.getElementById('fileChip').classList.add('visible');
+  document.getElementById('splitBtn').disabled = false;
+  updateRamWarning(file);
+
+  const d = await tryHtml5Duration(file);
+  if (d > 0) {
+    detectedDur = d;
+    document.getElementById('fileSub').textContent = fmtSize(file.size) + ' · ' + fmt(d);
+  } else {
+    document.getElementById('fileSub').textContent = fmtSize(file.size) + ' · duration via FFmpeg probe';
+  }
+  updatePreview();
+}
+
+function removeFile() {
+  selectedFile = null; detectedDur = 0;
+  document.getElementById('fileChip').classList.remove('visible');
+  document.getElementById('splitBtn').disabled = true;
+  document.getElementById('previewBox').innerHTML = 'Select a file to preview split.';
+  document.getElementById('ramRow').style.display = 'none';
+  document.getElementById('fileInput').value = '';
+}
+
+// ──────────────────────────────────────────────
+//  Preview
+// ──────────────────────────────────────────────
+function updatePreview() {
+  const box = document.getElementById('previewBox');
+  if (!selectedFile) { box.innerHTML='Select a file to preview split.'; return; }
+  const ext  = selectedFile.name.split('.').pop().toLowerCase();
+  const base = selectedFile.name.replace(/\.[^.]+$/,'');
+  if (detectedDur > 0) {
+    const n = Math.ceil(detectedDur/selectedSec);
+    box.innerHTML=`<span class="hl">${n} parts</span> will be saved<br>
+      <span style="color:var(--muted)"><span class="hl">${base}_part1.${ext}</span> … <span class="hl">${base}_part${n}.${ext}</span></span><br>
+      Each ≤ <span class="hl">${fmt(selectedSec)}</span> · lossless copy`;
+  } else {
+    box.innerHTML=`Split every <span class="hl">${fmt(selectedSec)}</span><br>
+      <span style="color:var(--muted)">Duration TBD · output: <span class="hl">${base}_part1.${ext}</span>, …</span>`;
+  }
+}
+
+// ──────────────────────────────────────────────
+//  Duration buttons
+// ──────────────────────────────────────────────
+document.querySelectorAll('.dur-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.dur-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    selectedSec = parseInt(btn.dataset.sec);
+    document.getElementById('customSec').value = '';
+    updatePreview();
+  });
+});
+document.getElementById('customSec').addEventListener('input', e => {
+  const v = parseInt(e.target.value);
+  if (v>0) {
+    selectedSec=v;
+    document.querySelectorAll('.dur-btn').forEach(b=>b.classList.remove('active'));
+    updatePreview();
+  }
+});
+
+// ──────────────────────────────────────────────
+//  Drop zone + file input
+// ──────────────────────────────────────────────
+const dropZone  = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e=>{e.preventDefault();dropZone.classList.add('drag-over');});
+dropZone.addEventListener('dragleave', ()=>dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e=>{
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e=>{ if(e.target.files[0]) handleFile(e.target.files[0]); });
+document.getElementById('removeBtn').addEventListener('click', e=>{ e.stopPropagation(); removeFile(); });
+
+// ──────────────────────────────────────────────
+//  MAIN: Split
+// ──────────────────────────────────────────────
+document.getElementById('splitBtn').addEventListener('click', async () => {
+  if (!selectedFile) return;
+  const btn = document.getElementById('splitBtn');
+  btn.disabled = true; btn.textContent = '⏳ Processing…';
+  document.getElementById('logBox').textContent = '';
+  document.getElementById('partsList').innerHTML = '';
+  document.getElementById('partCounter').textContent = '';
+  setProgress(0); setStatus('Loading FFmpeg…','active');
+
+  try {
+    await ensureFFmpeg();
+
+    setStatus('Reading file…','active');
+    const ext      = selectedFile.name.split('.').pop().toLowerCase();
+    const base     = selectedFile.name.replace(/\.[^.]+$/,'');
+    const inName   = `input.${ext}`;
+
+    log(`File: ${selectedFile.name} (${fmtSize(selectedFile.size)})`);
+    const fileData = await fetchFile(selectedFile);
+    ffmpeg.FS('writeFile', inName, fileData);
+    log('Written to virtual FS ✓');
+
+    // Probe if duration unknown
+    if (!detectedDur || !isFinite(detectedDur) || detectedDur<=0) {
+      setStatus('Probing duration…','active'); detectedDur = 0;
+      try { await ffmpeg.run('-i', inName); } catch(_){}
+      log(`Duration: ${fmt(detectedDur)}`);
+    }
+    if (!detectedDur || detectedDur<=0)
+      throw new Error('Could not detect duration. File may be corrupt or unsupported.');
+
+    document.getElementById('fileSub').textContent = fmtSize(selectedFile.size)+' · '+fmt(detectedDur);
+
+    const total = Math.ceil(detectedDur/selectedSec);
+    log(`Splitting into ${total} parts × ${selectedSec}s`);
+    document.getElementById('partCounter').textContent = `0 / ${total}`;
+
+    // Build list UI
+    const list = document.getElementById('partsList');
+    list.innerHTML='';
+    for (let i=0;i<total;i++){
+      const s=i*selectedSec, e=Math.min(s+selectedSec,detectedDur);
+      const row=document.createElement('div'); row.className='part-row'; row.id=`row-${i}`;
+      row.innerHTML=`<div class="dot" id="dot-${i}"></div>
+        <div class="part-name">${base}_part${i+1}.${ext}</div>
+        <div class="part-time">${fmt(s)}→${fmt(e)}</div>`;
+      list.appendChild(row);
+    }
+
+    // Split each part
+    for (let i=0;i<total;i++){
+      const start=i*selectedSec, outName=`${base}_part${i+1}.${ext}`;
+      document.getElementById(`dot-${i}`).className='dot active';
+      setStatus(`Part ${i+1} / ${total}  —  ${outName}`,'active');
+      setProgress(Math.round((i/total)*95));
+      document.getElementById('partCounter').textContent=`${i}/${total}`;
+
+      await ffmpeg.run(
+        '-ss', String(start), '-i', inName,
+        '-t', String(selectedSec),
+        '-c', 'copy',
+        '-avoid_negative_ts','make_zero',
+        outName
+      );
+
+      const data = ffmpeg.FS('readFile', outName);
+      const blob = new Blob([data.buffer], { type: mimeFor(ext) });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href=url; a.download=outName;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url), 8000);
+
+      ffmpeg.FS('unlink', outName);
+      document.getElementById(`dot-${i}`).className='dot done';
+      log(`✓ ${outName}`);
+    }
+
+    try { ffmpeg.FS('unlink', inName); } catch(_){}
+    setProgress(100);
+    setStatus(`✅ Done — ${total} parts saved to Downloads`,'done');
+    document.getElementById('partCounter').textContent=`${total}/${total}`;
+    log(`\n✅ All ${total} parts complete.`);
+
+  } catch(err) {
+    setStatus('❌ '+err.message,'error');
+    log('\n❌ '+err.message);
+    console.error(err);
+  } finally {
+    btn.disabled=false; btn.innerHTML='⚡ Split File';
+  }
+});
+</script>
+</body>
+</html>
